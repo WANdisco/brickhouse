@@ -30,6 +30,15 @@ class SketchSetBuffer implements AggregationBuffer {
 	    return -1;
 	  }
 	}
+
+  public long getEstimatedReach()
+  {
+    if(sketchSet != null) {
+       return (long)SketchSet.EstimatedReach(sketchSet.lastItem(), sketchSet.getMaxItems());
+    } else {
+      return -1;
+    }
+  }
 	
 	public List<String> getSketchItems() {
        return sketchSet.getMinHashItems();
