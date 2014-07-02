@@ -18,6 +18,9 @@ package brickhouse.udf.sketch;
 
 
 
+import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.hive.ql.exec.Description;
@@ -25,18 +28,17 @@ import org.apache.hadoop.hive.ql.metadata.HiveException;
 import org.apache.hadoop.hive.ql.parse.SemanticException;
 import org.apache.hadoop.hive.ql.udf.generic.AbstractGenericUDAFResolver;
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDAFEvaluator;
-import org.apache.hadoop.hive.serde2.objectinspector.ConstantObjectInspector;
-import org.apache.hadoop.hive.serde2.objectinspector.MapObjectInspector;
-import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
-import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory;
+import org.apache.hadoop.hive.serde2.objectinspector.*;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector.Category;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.LongObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.StringObjectInspector;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
+import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.log4j.Logger;
+import gnu.trove.set.hash.TLongHashSet;
 
 
 /**
@@ -58,13 +60,17 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
   public GenericUDAFEvaluator getEvaluator(TypeInfo[] parameters)
           throws SemanticException {
 
-      if( !parameters[0].getTypeName().equals("string") ) {
-          throw new SemanticException("sketch_set_cnt UDAF only takes String as values; not " + parameters[0].getTypeName());
+      if( !parameters[0].getTypeName().equals("string")
+       && !parameters[0].getTypeName().equals("bigint")) {
+          throw new SemanticException("sketch_set_cnt UDAF only takes String or longs as values; not " + parameters[0].getTypeName());
       }
       if((parameters.length > 1) && !parameters[1].getTypeName().equals("int")) {
           throw new SemanticException("Size of sketch must be an int; Got " + parameters[1].getTypeName());
       }
-      return new SketchSetUDAFEvaluator();
+      SketchSetUDAFEvaluator se = new SketchSetUDAFEvaluator();
+      se.setSketchSetType(parameters[0].getTypeName().equals("bigint") ? 1 : 0);
+      //return new SketchSetUDAFEvaluator();//parameters[0].getTypeName().equals("bigint") ? 1 : 0);
+      return se;
   }
 
 
@@ -74,16 +80,42 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
 	  private MapObjectInspector partialMapOI;
 	  private LongObjectInspector partialMapHashOI;
 	  private StringObjectInspector partialMapStrOI;
+      private PrimitiveObjectInspector inputPrimitiveOI;
+      private StandardListObjectInspector partialOI;
 	  private int sketchSetSize = -1;
 
+      public int getSketchSetType() {
+          return sketchSetType;
+      }
+
+      public void setSketchSetType(int sketchSetType) {
+          this.sketchSetType = sketchSetType;
+      }
+
+      private int sketchSetType = 0;
 
     public ObjectInspector init(Mode m, ObjectInspector[] parameters)
         throws HiveException {
       super.init(m, parameters);
       /// 
       if (m == Mode.PARTIAL1 || m == Mode.COMPLETE) {
-    	  //// iterate() gets called.. string is passed in
-    	  this.inputStrOI = (StringObjectInspector) parameters[0];
+          ObjectInspector.Category cat = parameters[0].getCategory();
+          switch (cat) {
+              case PRIMITIVE:
+                  break;
+              default:
+                  throw new IllegalArgumentException(
+                          "Only PRIMITIVE types are allowed as input. Passed a "
+                                  + cat.name());
+          }
+
+          if(sketchSetType == 0) {
+              this.inputStrOI = (StringObjectInspector) parameters[0];
+          } else {
+              this.inputPrimitiveOI = (PrimitiveObjectInspector) parameters[0];
+          }
+
+
     	  if( parameters.length > 1 && m == Mode.PARTIAL1) {
     	     //// get the sketch set size from the second parameters
     	    if(!( parameters[1] instanceof ConstantObjectInspector ) ) {
@@ -93,12 +125,16 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
             this.sketchSetSize = ((IntWritable) sizeOI.getWritableConstantValue()).get();
     	  } else {
     	    sketchSetSize = DEFAULT_SKETCH_SET_SIZE;
-    	  }
+          }
       } else { /// Mode m == Mode.PARTIAL2 || m == Mode.FINAL
     	   /// merge() gets called ... map is passed in ..
-    	  this.partialMapOI = (MapObjectInspector) parameters[0];
-    	  this.partialMapHashOI = (LongObjectInspector) partialMapOI.getMapKeyObjectInspector();
-    	  this.partialMapStrOI = (StringObjectInspector) partialMapOI.getMapValueObjectInspector();
+          if(sketchSetType == 1) {
+              partialOI = (StandardListObjectInspector) parameters[0];
+          } else {
+            this.partialMapOI = (MapObjectInspector) parameters[0];
+            this.partialMapHashOI = (LongObjectInspector) partialMapOI.getMapKeyObjectInspector();
+            this.partialMapStrOI = (StringObjectInspector) partialMapOI.getMapValueObjectInspector();
+          }
         		 
       } 
       /// The intermediate result is a map of hashes and strings,
@@ -106,41 +142,81 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
       if( m == Mode.FINAL || m == Mode.COMPLETE) {
     	  /// for final result
          return PrimitiveObjectInspectorFactory.writableLongObjectInspector;
-      } else { /// m == Mode.PARTIAL1 || m == Mode.PARTIAL2 
-         return ObjectInspectorFactory.getStandardMapObjectInspector(
-        		 PrimitiveObjectInspectorFactory.javaLongObjectInspector,
-        		 PrimitiveObjectInspectorFactory.javaStringObjectInspector
-        		 );
+      } else { /// m == Mode.PARTIAL1 || m == Mode.PARTIAL2
+         if(sketchSetType == 1) {
+             return ObjectInspectorFactory
+                     .getStandardListObjectInspector(PrimitiveObjectInspectorFactory.writableBinaryObjectInspector);
+         } else {
+             return ObjectInspectorFactory.getStandardMapObjectInspector(
+                      PrimitiveObjectInspectorFactory.javaLongObjectInspector,
+                      PrimitiveObjectInspectorFactory.javaStringObjectInspector
+                    );
+         }
       }
     }
 
     @Override
     public AggregationBuffer getNewAggregationBuffer() throws HiveException {
-      SketchSetBuffer buff= new SketchSetBuffer();
-      buff.init(sketchSetSize);
-      return buff;
+      if(sketchSetType == 1) {
+          CntAggregationBuffer ceb = new CntAggregationBuffer();
+          reset(ceb);
+          return ceb;
+      } else {
+        SketchSetBuffer buff= new SketchSetBuffer();
+        buff.init(sketchSetSize);
+        buff.setParamType(sketchSetType);
+        return buff;
+      }
     }
 
     @Override
     public void iterate(AggregationBuffer agg, Object[] parameters)
         throws HiveException {
-      Object strObj = parameters[0];
 
-      if (strObj != null) {
-    	  String str = inputStrOI.getPrimitiveJavaObject( strObj);
-          SketchSetBuffer myagg = (SketchSetBuffer) agg;
-          myagg.addItem(str);
+      if(parameters[0] == null)
+          return;
 
+      if(sketchSetType == 1) {
+          CntAggregationBuffer ceb = (CntAggregationBuffer) agg;
+          Object x = ObjectInspectorUtils.copyToStandardObject(parameters[0],
+                  inputPrimitiveOI, ObjectInspectorUtils.ObjectInspectorCopyOption.JAVA);
+          Long value = (Long) x;
+          ceb.hash.add(value);
+      } else {
+        Object strObj = parameters[0];
+        String str = inputStrOI.getPrimitiveJavaObject( strObj);
+        SketchSetBuffer myagg = (SketchSetBuffer) agg;
+        myagg.addItem(str);
       }
     }
 
     @Override
     public void merge(AggregationBuffer agg, Object partial)
         throws HiveException {
-    	/// Partial is going to be a map of strings and hashes 
-        SketchSetBuffer myagg = (SketchSetBuffer) agg;
-        
-        if( partial != null) {
+    	/// Partial is going to be a map of strings and hashes
+        if (partial == null) {
+            return;
+        }
+
+        if(sketchSetType == 1) {
+            CntAggregationBuffer ceb = (CntAggregationBuffer) agg;
+            TLongHashSet hh = null;
+            try {
+                List<BytesWritable> partialResult = (List<BytesWritable>) partialOI
+                        .getList(partial);
+                BytesWritable partialBytes = partialResult.get(0);
+                ByteArrayInputStream bais = new ByteArrayInputStream(
+                        partialBytes.getBytes());
+                ObjectInputStream oi = new ObjectInputStream(bais);
+                hh = (TLongHashSet) oi.readObject();
+            } catch (Exception e) {
+                throw new HiveException(e.getMessage());
+            }
+            mergeHashSets(hh, ceb);
+
+        } else {
+            SketchSetBuffer myagg = (SketchSetBuffer) agg;
+
             Map<Object,Object> partialResult = (Map<Object,Object>)  this.partialMapOI.getMap(partial);
             if( partialResult !=null) {
                 //// Place SKETCH_SIZE into the partial map ...
@@ -166,23 +242,68 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
         }
     }
 
+   private void mergeHashSets(TLongHashSet hh, CntAggregationBuffer ceb) {
+       if (ceb.hash.size() == 0) {
+           ceb.hash = hh;
+           return;
+       }
+       if (ceb.hash.size() > hh.size()) {
+           ceb.hash.addAll(hh);
+       } else {
+           hh.addAll(ceb.hash);
+           ceb.hash = hh;
+       }
+   }
+
+
+
     @Override
     public void reset(AggregationBuffer buff) throws HiveException {
-      SketchSetBuffer sketchBuff = (SketchSetBuffer) buff;
-      sketchBuff.reset();
+      if(sketchSetType == 1) {
+        ((CntAggregationBuffer) buff).hash = new TLongHashSet();
+      } else {
+        SketchSetBuffer sketchBuff = (SketchSetBuffer) buff;
+        sketchBuff.reset();
+      }
     }
 
     @Override
     public Object terminate(AggregationBuffer agg) throws HiveException {
-      SketchSetBuffer myagg = (SketchSetBuffer) agg;
-      long reach = myagg.getEstimatedReach();
-      return new LongWritable(reach);
+      if(sketchSetType == 1) {
+        CntAggregationBuffer ceb = (CntAggregationBuffer) agg;
+        if (ceb.hash == null) {
+          return null;
+        }
+        return new LongWritable(ceb.hash.size());
+      } else {
+        SketchSetBuffer myagg = (SketchSetBuffer) agg;
+        long reach = myagg.getEstimatedReach();
+        return new LongWritable(reach);
+      }
     }
 
     @Override
     public Object terminatePartial(AggregationBuffer agg) throws HiveException {
-    	SketchSetBuffer myagg = (SketchSetBuffer)agg;
-    	return myagg.getPartialMap();
+        if(sketchSetType == 1) {
+            CntAggregationBuffer ceb = (CntAggregationBuffer) agg;
+            ByteArrayOutputStream b = new ByteArrayOutputStream();
+            try {
+                ObjectOutputStream o = new ObjectOutputStream(b);
+                o.writeObject(ceb.hash);
+            } catch (IOException e) {
+                throw new HiveException(e.getMessage());
+            }
+            byte[] arr = b.toByteArray();
+            List<BytesWritable> bl = new ArrayList<BytesWritable>();
+            bl.add(new BytesWritable(arr));
+            return bl;
+        } else {
+    	  SketchSetBuffer myagg = (SketchSetBuffer)agg;
+    	  return myagg.getPartialMap();
+        }
+    }
+    static class CntAggregationBuffer implements AggregationBuffer {
+      TLongHashSet hash = new TLongHashSet();
     }
   }
 

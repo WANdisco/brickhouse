@@ -9,6 +9,7 @@ import brickhouse.analytics.uniques.SketchSet;
 
 class SketchSetBuffer implements AggregationBuffer {
 	private SketchSet sketchSet = null;
+    private int paramType = 0;
 	
 
 	public void init(int size) {
@@ -31,10 +32,22 @@ class SketchSetBuffer implements AggregationBuffer {
 	  }
 	}
 
+    public void setParamType(int type) {
+        paramType = type;
+    }
+
   public long getEstimatedReach()
   {
     if(sketchSet != null) {
-       return (long)SketchSet.EstimatedReach(sketchSet.lastItem(), sketchSet.getMaxItems());
+        try {
+            if(paramType == 0) {
+                return (long)SketchSet.EstimatedReach(sketchSet.lastItem(), sketchSet.getMaxItems());
+            } else {
+                return (long)SketchSet.EstimatedReach(sketchSet.lastHash(), sketchSet.getMaxItems());
+            }
+        } catch(Exception e) {
+            return -1;
+        }
     } else {
       return -1;
     }

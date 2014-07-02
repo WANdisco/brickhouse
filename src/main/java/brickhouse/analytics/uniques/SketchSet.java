@@ -38,8 +38,7 @@ public class SketchSet implements ICountDistinct {
     private  int maxItems = DEFAULT_MAX_ITEMS;
 	private TreeMap<Long,String> sortedMap;
 	private static HashFunction HASH = Hashing.md5();
-	
-    
+
     public SketchSet() {
     	sortedMap = new TreeMap<Long,String>();
     }
