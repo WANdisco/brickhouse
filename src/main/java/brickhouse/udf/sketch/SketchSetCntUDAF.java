@@ -20,6 +20,7 @@ package brickhouse.udf.sketch;
 
 import java.io.*;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -77,9 +78,6 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
   public static class SketchSetUDAFEvaluator extends GenericUDAFEvaluator {
     // For PARTIAL1 and COMPLETE: ObjectInspectors for original data
 	  private StringObjectInspector inputStrOI;
-	  private MapObjectInspector partialMapOI;
-	  private LongObjectInspector partialMapHashOI;
-	  private StringObjectInspector partialMapStrOI;
       private PrimitiveObjectInspector inputPrimitiveOI;
       private StandardListObjectInspector partialOI;
 	  private int sketchSetSize = -1;
@@ -131,9 +129,7 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
           if(sketchSetType == 1) {
               partialOI = (StandardListObjectInspector) parameters[0];
           } else {
-            this.partialMapOI = (MapObjectInspector) parameters[0];
-            this.partialMapHashOI = (LongObjectInspector) partialMapOI.getMapKeyObjectInspector();
-            this.partialMapStrOI = (StringObjectInspector) partialMapOI.getMapValueObjectInspector();
+              partialOI = (StandardListObjectInspector) parameters[0];
           }
         		 
       } 
@@ -147,10 +143,8 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
              return ObjectInspectorFactory
                      .getStandardListObjectInspector(PrimitiveObjectInspectorFactory.writableBinaryObjectInspector);
          } else {
-             return ObjectInspectorFactory.getStandardMapObjectInspector(
-                      PrimitiveObjectInspectorFactory.javaLongObjectInspector,
-                      PrimitiveObjectInspectorFactory.javaStringObjectInspector
-                    );
+             return ObjectInspectorFactory
+                     .getStandardListObjectInspector(PrimitiveObjectInspectorFactory.writableBinaryObjectInspector);
          }
       }
     }
@@ -216,27 +210,37 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
 
         } else {
             SketchSetBuffer myagg = (SketchSetBuffer) agg;
+            Map<Long,String> hh = null;
+            try {
+                List<BytesWritable> partialResult = (List<BytesWritable>) partialOI
+                        .getList(partial);
+                BytesWritable partialBytes = partialResult.get(0);
+                ByteArrayInputStream bais = new ByteArrayInputStream(
+                        partialBytes.getBytes());
+                ObjectInputStream oi = new ObjectInputStream(bais);
+                hh = (Map<Long,String>) oi.readObject();
+            } catch(Exception e) {
+                throw new HiveException(e.getMessage());
+            }
 
-            Map<Object,Object> partialResult = (Map<Object,Object>)  this.partialMapOI.getMap(partial);
-            if( partialResult !=null) {
-                //// Place SKETCH_SIZE into the partial map ...
-                if(myagg.getSize() == -1) {
-                  for( Map.Entry entry : partialResult.entrySet()) {
-                    Long hash = this.partialMapHashOI.get( entry.getKey());
-                    String item = partialMapStrOI.getPrimitiveJavaObject( entry.getValue());
+            //// Place SKETCH_SIZE into the partial map ...
+            if(myagg.getSize() == -1) {
+                for( Map.Entry entry : hh.entrySet()) {
+                    Long hash = (Long)entry.getKey(); //this.partialMapHashOI.get( entry.getKey());
+                    String item = (String) entry.getValue(); //partialMapStrOI.getPrimitiveJavaObject( entry.getValue());
                     if(item.equals(SKETCH_SIZE_STR)) {
-                      this.sketchSetSize = (int)hash.intValue();
-                      myagg.init(sketchSetSize);
-                      break;
+                        this.sketchSetSize = (int)hash.intValue();
+                        myagg.init(sketchSetSize);
+                        break;
                     }
-                  }
                 }
-                for( Map.Entry entry : partialResult.entrySet()) {
-                    Long hash = this.partialMapHashOI.get( entry.getKey());
-                    String item = partialMapStrOI.getPrimitiveJavaObject( entry.getValue());
-                    if(!item.equals(SKETCH_SIZE_STR)) {
-                      myagg.addHash(hash, item);
-                    }
+            }
+
+            for( Map.Entry entry : hh.entrySet()) {
+                Long hash = (Long)entry.getKey(); //this.partialMapHashOI.get( entry.getKey());
+                String item = (String)entry.getValue(); //partialMapStrOI.getPrimitiveJavaObject( entry.getValue());
+                if(!item.equals(SKETCH_SIZE_STR)) {
+                    myagg.addHash(hash, item);
                 }
             }
         }
@@ -299,9 +303,23 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
             return bl;
         } else {
     	  SketchSetBuffer myagg = (SketchSetBuffer)agg;
-    	  return myagg.getPartialMap();
+          Map<Long,String> tempMap = myagg.getPartialMap();
+
+          ByteArrayOutputStream b = new ByteArrayOutputStream();
+          try {
+            ObjectOutputStream o = new ObjectOutputStream(b);
+            o.writeObject(tempMap);
+          } catch (IOException e) {
+            throw new HiveException(e.getMessage());
+          }
+          byte[] arr = b.toByteArray();
+          List<BytesWritable> bl = new ArrayList<BytesWritable>();
+          bl.add(new BytesWritable(arr));
+          return bl;
         }
     }
+
+
     static class CntAggregationBuffer implements AggregationBuffer {
       TLongHashSet hash = new TLongHashSet();
     }
