@@ -1,27 +1,54 @@
 package brickhouse.udf.sketch;
 
+import java.io.*;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
+import gnu.trove.set.hash.THashSet;
+import gnu.trove.set.hash.TLongHashSet;
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDAFEvaluator.AggregationBuffer;
 
 import brickhouse.analytics.uniques.SketchSet;
 
 class SketchSetBuffer implements AggregationBuffer {
 	private SketchSet sketchSet = null;
-    private int paramType = 0;
-	
+//  public THashSet hash = null;
+  public MergedHashes merged = null;
+  private int paramType = 0;
+  public int threshold = 5000;
 
-	public void init(int size) {
-		if( sketchSet == null || 
+  public void init(int size) {
+    if(merged == null)
+      merged = new MergedHashes();
+
+    if( sketchSet == null ||
+        ((sketchSet.getMaxItems() != size) && (size != -1))) {
+      sketchSet = new SketchSet( size);
+    } else {
+      sketchSet.clear();
+    }
+  }
+
+	public void init(int size, int threshold) {
+    if(merged == null)
+      merged = new MergedHashes();
+
+		if( sketchSet == null ||
 		    ((sketchSet.getMaxItems() != size) && (size != -1))) {
 			sketchSet = new SketchSet( size);
 		} else {
 			sketchSet.clear();
 		}
+    this.threshold = threshold;
+    if(threshold > 0)
+      merged.hash = new THashSet();
 	}
+
 	public void reset() {
 	  sketchSet.clear();
+    merged = new MergedHashes();
+    merged.hash = new THashSet();
 	}
 	
 	public int getSize() {
@@ -32,7 +59,7 @@ class SketchSetBuffer implements AggregationBuffer {
 	  }
 	}
 
-    public void setParamType(int type) {
+  public void setParamType(int type) {
         paramType = type;
     }
 
@@ -54,19 +81,23 @@ class SketchSetBuffer implements AggregationBuffer {
   }
 	
 	public List<String> getSketchItems() {
-       return sketchSet.getMinHashItems();
+    return sketchSet.getMinHashItems();
 	}
 	
-    public Map<Long,String> getPartialMap() {
-	    Map<Long,String> partial =  sketchSet.getHashItemMap();
-	    partial.put( (long)sketchSet.getMaxItems(), SketchSetUDAF.SKETCH_SIZE_STR);
-	    return partial;
-    }
+  public MergedHashes getPartialMap() {
+	  merged.sketch =  (TreeMap<Long,String>)sketchSet.getTreeItemMap();
+	  merged.sketch.put( (long)sketchSet.getMaxItems(), SketchSetUDAF.SKETCH_SIZE_STR);
+	  return merged;
+  }
     
-    public void addItem( String str) {
-       sketchSet.addItem( str) ;
-    }
-    public void addHash( Long hash, String str) {
-    	sketchSet.addHashItem( hash, str );
-    }
+  public void addItem( String str) {
+    sketchSet.addItem( str) ;
+    if(merged.hash != null && merged.hash.size() < threshold)
+      merged.hash.add(str);
+  }
+
+  public void addHash( Long hash, String str) {
+  	sketchSet.addHashItem( hash, str );
+  }
+
 }

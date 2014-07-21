@@ -24,6 +24,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import brickhouse.analytics.uniques.SketchSet;
+import gnu.trove.set.hash.THashSet;
 import org.apache.hadoop.hive.ql.exec.Description;
 import org.apache.hadoop.hive.ql.metadata.HiveException;
 import org.apache.hadoop.hive.ql.parse.SemanticException;
@@ -54,6 +56,7 @@ import gnu.trove.set.hash.TLongHashSet;
 public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
   private static final Logger LOG = Logger.getLogger(SketchSetCntUDAF.class);
   public static int DEFAULT_SKETCH_SET_SIZE =  5000;
+  public static int DEFAULT_THRESHOLD = 5000;
   static String SKETCH_SIZE_STR = "SKETCH_SIZE";
 
 
@@ -81,6 +84,7 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
       private PrimitiveObjectInspector inputPrimitiveOI;
       private StandardListObjectInspector partialOI;
 	  private int sketchSetSize = -1;
+    private int approxThreshold = -1;
 
       public int getSketchSetType() {
           return sketchSetType;
@@ -95,35 +99,39 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
     public ObjectInspector init(Mode m, ObjectInspector[] parameters)
         throws HiveException {
       super.init(m, parameters);
-      /// 
+
+      if( parameters.length > 1) {
+        // get the threshold value from the second parameter
+        if(!( parameters[1] instanceof ConstantObjectInspector ) ) {
+          throw new HiveException("Sketch Set size must be a constant");
+        }
+        ConstantObjectInspector sizeOI = (ConstantObjectInspector) parameters[1];
+
+        this.approxThreshold = ((IntWritable) sizeOI.getWritableConstantValue()).get();
+      } else {
+        this.approxThreshold = DEFAULT_THRESHOLD;
+      }
+
+      ///
       if (m == Mode.PARTIAL1 || m == Mode.COMPLETE) {
           ObjectInspector.Category cat = parameters[0].getCategory();
           switch (cat) {
               case PRIMITIVE:
-                  break;
+                if(sketchSetType == 0) {
+                  this.inputStrOI = (StringObjectInspector) parameters[0];
+                } else {
+                  this.inputPrimitiveOI = (PrimitiveObjectInspector) parameters[0];
+                }
+
+                sketchSetSize = DEFAULT_SKETCH_SET_SIZE;
+
+                break;
               default:
                   throw new IllegalArgumentException(
                           "Only PRIMITIVE types are allowed as input. Passed a "
                                   + cat.name());
           }
 
-          if(sketchSetType == 0) {
-              this.inputStrOI = (StringObjectInspector) parameters[0];
-          } else {
-              this.inputPrimitiveOI = (PrimitiveObjectInspector) parameters[0];
-          }
-
-
-    	  if( parameters.length > 1 && m == Mode.PARTIAL1) {
-    	     //// get the sketch set size from the second parameters
-    	    if(!( parameters[1] instanceof ConstantObjectInspector ) ) {
-    	        throw new HiveException("Sketch Set size must be a constant");
-    	    }
-    	    ConstantObjectInspector sizeOI = (ConstantObjectInspector) parameters[1];
-            this.sketchSetSize = ((IntWritable) sizeOI.getWritableConstantValue()).get();
-    	  } else {
-    	    sketchSetSize = DEFAULT_SKETCH_SET_SIZE;
-          }
       } else { /// Mode m == Mode.PARTIAL2 || m == Mode.FINAL
     	   /// merge() gets called ... map is passed in ..
           if(sketchSetType == 1) {
@@ -157,7 +165,7 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
           return ceb;
       } else {
         SketchSetBuffer buff= new SketchSetBuffer();
-        buff.init(sketchSetSize);
+        buff.init(sketchSetSize, approxThreshold);
         buff.setParamType(sketchSetType);
         return buff;
       }
@@ -187,7 +195,7 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
     @Override
     public void merge(AggregationBuffer agg, Object partial)
         throws HiveException {
-    	/// Partial is going to be a map of strings and hashes
+
         if (partial == null) {
             return;
         }
@@ -210,7 +218,8 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
 
         } else {
             SketchSetBuffer myagg = (SketchSetBuffer) agg;
-            Map<Long,String> hh = null;
+            MergedHashes hh = null;
+
             try {
                 List<BytesWritable> partialResult = (List<BytesWritable>) partialOI
                         .getList(partial);
@@ -218,14 +227,14 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
                 ByteArrayInputStream bais = new ByteArrayInputStream(
                         partialBytes.getBytes());
                 ObjectInputStream oi = new ObjectInputStream(bais);
-                hh = (Map<Long,String>) oi.readObject();
+                hh = (MergedHashes) oi.readObject();
             } catch(Exception e) {
                 throw new HiveException(e.getMessage());
             }
 
             //// Place SKETCH_SIZE into the partial map ...
             if(myagg.getSize() == -1) {
-                for( Map.Entry entry : hh.entrySet()) {
+                for( Map.Entry entry : hh.sketch.entrySet()) {
                     Long hash = (Long)entry.getKey(); //this.partialMapHashOI.get( entry.getKey());
                     String item = (String) entry.getValue(); //partialMapStrOI.getPrimitiveJavaObject( entry.getValue());
                     if(item.equals(SKETCH_SIZE_STR)) {
@@ -236,13 +245,27 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
                 }
             }
 
-            for( Map.Entry entry : hh.entrySet()) {
+            for( Map.Entry entry : hh.sketch.entrySet()) {
                 Long hash = (Long)entry.getKey(); //this.partialMapHashOI.get( entry.getKey());
                 String item = (String)entry.getValue(); //partialMapStrOI.getPrimitiveJavaObject( entry.getValue());
                 if(!item.equals(SKETCH_SIZE_STR)) {
                     myagg.addHash(hash, item);
                 }
             }
+
+          // Now merge HashSets. Do that only if and until size is lower than the threshold.
+          if(myagg.merged.hash.size() < approxThreshold) {
+            if(myagg.merged.hash.size() == 0) {
+              myagg.merged.hash = hh.hash;
+            } else {
+              if(myagg.merged.hash.size() > hh.hash.size()) {
+                myagg.merged.hash.addAll(hh.hash);
+              } else {
+                hh.hash.addAll(myagg.merged.hash);
+                myagg.merged.hash = hh.hash;
+              }
+            }
+          }
         }
     }
 
@@ -281,7 +304,9 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
         return new LongWritable(ceb.hash.size());
       } else {
         SketchSetBuffer myagg = (SketchSetBuffer) agg;
-        long reach = myagg.getEstimatedReach();
+        long reach = myagg.merged.hash.size();
+        if(reach >= approxThreshold)
+          reach = myagg.getEstimatedReach();
         return new LongWritable(reach);
       }
     }
@@ -302,8 +327,8 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
             bl.add(new BytesWritable(arr));
             return bl;
         } else {
-    	  SketchSetBuffer myagg = (SketchSetBuffer)agg;
-          Map<Long,String> tempMap = myagg.getPartialMap();
+    	    SketchSetBuffer myagg = (SketchSetBuffer)agg;
+          MergedHashes tempMap = myagg.getPartialMap();
 
           ByteArrayOutputStream b = new ByteArrayOutputStream();
           try {

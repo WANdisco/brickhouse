@@ -17,6 +17,7 @@ package brickhouse.analytics.uniques;
  **/
 
 
+import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
@@ -83,6 +84,8 @@ public class SketchSet implements ICountDistinct {
 	public SortedMap<Long,String> getHashItemMap() {
 		return this.sortedMap;
 	}
+
+  public TreeMap<Long,String> getTreeItemMap() { return this.sortedMap; }
 	
 	public List<Long> getMinHashes() {
 	   return new ArrayList( this.sortedMap.keySet());
