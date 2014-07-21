@@ -254,7 +254,7 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
             }
 
           // Now merge HashSets. Do that only if and until size is lower than the threshold.
-          if(myagg.merged.hash.size() < approxThreshold) {
+          if(myagg.merged.hash.size() < approxThreshold && hh.hash != null && hh.hash.size() > 0) {
             if(myagg.merged.hash.size() == 0) {
               myagg.merged.hash = hh.hash;
             } else {
@@ -304,7 +304,9 @@ public class SketchSetCntUDAF extends AbstractGenericUDAFResolver {
         return new LongWritable(ceb.hash.size());
       } else {
         SketchSetBuffer myagg = (SketchSetBuffer) agg;
-        long reach = myagg.merged.hash.size();
+        long reach = -1;
+        if(myagg.merged != null && myagg.merged.hash != null)
+          reach = myagg.merged.hash.size();
         if(reach >= approxThreshold)
           reach = myagg.getEstimatedReach();
         return new LongWritable(reach);
